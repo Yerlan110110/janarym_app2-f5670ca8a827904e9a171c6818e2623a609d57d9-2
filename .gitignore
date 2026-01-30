@@ -70,4 +70,8 @@ DerivedData/
 # Large model files
 assets/models/vosk-*
 assets/models/vosk-model-ru-0.42.zip
-assets/models/vosk-model-ru-0.42.zip
+
+# Environment files
+.env
+.env.local
+.env.backup.*
