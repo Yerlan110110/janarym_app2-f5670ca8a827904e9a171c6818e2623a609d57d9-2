@@ -8,6 +8,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:image/image.dart' as img;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:vibration/vibration.dart';
 
 import 'logic/command_router.dart';
 import 'openai_client.dart';
@@ -74,6 +75,9 @@ class _JanarymHomeState extends State<JanarymHome>
   bool _followUpActive = false;
   bool _wakeHandling = false;
   bool _thinkingSoundPlayed = false;
+  bool _vibrationAvailable = false;
+  bool _isSpeaking = false;
+  int _requestId = 0;
 
   @override
   void initState() {
@@ -84,6 +88,7 @@ class _JanarymHomeState extends State<JanarymHome>
     _sttService.state.addListener(_handleSttStateChange);
     _wakeService.state.addListener(_handleWakeStateChange);
     _initTts();
+    _initVibration();
     _initMicAndWake();
     _initCameraLive();
   }
@@ -107,6 +112,39 @@ class _JanarymHomeState extends State<JanarymHome>
     await _tts.setSpeechRate(0.45);
     await _tts.setPitch(1.0);
     await _tts.awaitSpeakCompletion(true);
+  }
+
+  Future<void> _initVibration() async {
+    try {
+      final hasVibrator = await Vibration.hasVibrator();
+      _vibrationAvailable = hasVibrator ?? false;
+    } catch (_) {
+      _vibrationAvailable = false;
+    }
+  }
+
+  Future<void> _vibrateStart() async {
+    if (!_vibrationAvailable) return;
+    // мягкий короткий двойной импульс
+    try {
+      await Vibration.vibrate(pattern: [0, 40, 60, 40], amplitude: 64);
+    } catch (_) {}
+  }
+
+  Future<void> _vibrateThinking() async {
+    if (!_vibrationAvailable) return;
+    // мягкий одиночный импульс
+    try {
+      await Vibration.vibrate(duration: 35, amplitude: 50);
+    } catch (_) {}
+  }
+
+  Future<void> _vibrateEnd() async {
+    if (!_vibrationAvailable) return;
+    // мягкий “затухающий” двойной импульс
+    try {
+      await Vibration.vibrate(pattern: [0, 60, 80, 30], amplitude: 40);
+    } catch (_) {}
   }
 
   Future<void> _playStartCue() async {
@@ -311,12 +349,16 @@ class _JanarymHomeState extends State<JanarymHome>
   }
 
   Future<void> _handleWakeDetected() async {
-    if (_wakeHandling) return;
+    final canBargeIn =
+        _isSpeaking || _gptStatus == GptStatus.loading || _followUpActive;
+    if (_wakeHandling && !canBargeIn) return;
     _wakeHandling = true;
     debugPrint('[Wake] detected');
     setState(() => _lastWakeAt = DateTime.now());
+    _requestId++;
     await _tts.stop();
     await _playStartCue();
+    await _vibrateStart();
     if (_followUpActive) {
       await _sttService.stop();
       _followUpActive = false;
@@ -331,6 +373,7 @@ class _JanarymHomeState extends State<JanarymHome>
     if (!_micGranted) return;
 
     _commandInFlight = true;
+    final localRequestId = _requestId;
     try {
       await _wakeService.stop();
       debugPrint('[STT] start ($reason)');
@@ -339,14 +382,18 @@ class _JanarymHomeState extends State<JanarymHome>
         durationSeconds: 5,
       );
 
+      // Restart wake-word immediately after STT to allow barge-in
+      await _wakeService.start();
+
+      if (localRequestId != _requestId) return;
       final cleaned = (text ?? '').trim();
       if (cleaned.isNotEmpty) {
         await _handleUserText(cleaned);
       } else {
         await _playEndCue();
+        await _vibrateEnd();
       }
     } finally {
-      await _wakeService.start();
       _commandInFlight = false;
     }
   }
@@ -370,9 +417,11 @@ class _JanarymHomeState extends State<JanarymHome>
       _gptError = '';
     });
     debugPrint('[GPT] start');
+    final localRequestId = _requestId;
     if (!_thinkingSoundPlayed) {
       _thinkingSoundPlayed = true;
       await _playThinkingCue();
+      await _vibrateThinking();
     }
 
     try {
@@ -381,6 +430,7 @@ class _JanarymHomeState extends State<JanarymHome>
         systemPrompt: systemPrompt,
       );
       if (!mounted) return;
+      if (localRequestId != _requestId) return;
       setState(() {
         _gptStatus = GptStatus.ok;
         _lastAnswer = answer;
@@ -409,9 +459,11 @@ class _JanarymHomeState extends State<JanarymHome>
       _gptError = '';
     });
     debugPrint('[GPT] vision start');
+    final localRequestId = _requestId;
     if (!_thinkingSoundPlayed) {
       _thinkingSoundPlayed = true;
       await _playThinkingCue();
+      await _vibrateThinking();
     }
 
     try {
@@ -421,6 +473,7 @@ class _JanarymHomeState extends State<JanarymHome>
         systemPrompt: systemPrompt,
       );
       if (!mounted) return;
+      if (localRequestId != _requestId) return;
       setState(() {
         _gptStatus = GptStatus.ok;
         _lastAnswer = answer;
@@ -495,26 +548,29 @@ class _JanarymHomeState extends State<JanarymHome>
     if (_followUpActive) return;
     if (!_micGranted) return;
     _followUpActive = true;
+    final localRequestId = _requestId;
 
     try {
-      await _wakeService.stop();
       await _playStartCue();
+      await _vibrateStart();
       await _speak('Нужно еще что-то?');
       debugPrint('[STT] follow-up start');
       final text = await _sttService.startCommandListening(durationSeconds: 5);
       final cleaned = (text ?? '').trim();
+      if (localRequestId != _requestId) return;
       if (cleaned.isNotEmpty) {
         if (_isNegativeResponse(cleaned)) {
           await _playEndCue();
+          await _vibrateEnd();
         } else {
           await _handleUserText(cleaned);
         }
       } else {
         await _playEndCue();
+        await _vibrateEnd();
       }
     } finally {
       _followUpActive = false;
-      await _wakeService.start();
     }
   }
 
@@ -522,8 +578,10 @@ class _JanarymHomeState extends State<JanarymHome>
     final t = text.trim();
     if (t.isEmpty) return;
     debugPrint('[TTS] speak');
+    _isSpeaking = true;
     await _tts.stop();
     await _tts.speak(t);
+    _isSpeaking = false;
   }
 
   Future<void> _stopAll() async {
@@ -532,6 +590,7 @@ class _JanarymHomeState extends State<JanarymHome>
     await _tts.stop();
     _followUpActive = false;
     await _playEndCue();
+    await _vibrateEnd();
     if (_micGranted) {
       await _wakeService.start();
     }

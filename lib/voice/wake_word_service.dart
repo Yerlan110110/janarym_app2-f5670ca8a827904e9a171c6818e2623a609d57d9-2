@@ -83,6 +83,10 @@ class WakeWordService {
       }
 
       final mode = (dotenv.env['KEYWORD_MODE'] ?? 'jarvis').toLowerCase().trim();
+      final sensitivity =
+          double.tryParse((dotenv.env['WAKE_SENSITIVITY'] ?? '0.9').trim()) ??
+              0.9;
+      final clampedSensitivity = sensitivity.clamp(0.0, 1.0).toDouble();
       if (mode == 'custom') {
         const assetPath = 'assets/keywords/janarym.ppn';
         final hasCustom = await _assetExists(assetPath);
@@ -91,6 +95,7 @@ class WakeWordService {
             accessKey,
             [assetPath],
             _onWakeWord,
+            sensitivities: [clampedSensitivity],
             errorCallback: _onError,
           );
           _setState(
@@ -111,6 +116,7 @@ class WakeWordService {
         accessKey,
         [BuiltInKeyword.JARVIS],
         _onWakeWord,
+        sensitivities: [clampedSensitivity],
         errorCallback: _onError,
       );
       _setState(
