@@ -37,6 +37,8 @@ class JanarymApp extends StatelessWidget {
 
 enum GptStatus { idle, loading, ok, error }
 
+enum CircleState { idle, wake, listening, thinking, speaking, end }
+
 class JanarymHome extends StatefulWidget {
   const JanarymHome({super.key});
 
@@ -45,7 +47,7 @@ class JanarymHome extends StatefulWidget {
 }
 
 class _JanarymHomeState extends State<JanarymHome>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   final FlutterTts _tts = FlutterTts();
   final AudioPlayer _sfxPlayer = AudioPlayer();
   final CommandRouter _router = CommandRouter();
@@ -78,11 +80,21 @@ class _JanarymHomeState extends State<JanarymHome>
   bool _vibrationAvailable = false;
   bool _isSpeaking = false;
   int _requestId = 0;
+  late final AnimationController _circleController;
+  late final Animation<double> _circlePulse;
+  CircleState _circleState = CircleState.idle;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _circleController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2400),
+    )..repeat(reverse: true);
+    _circlePulse = Tween<double>(begin: 0.95, end: 1.15).animate(
+      CurvedAnimation(parent: _circleController, curve: Curves.easeInOutQuad),
+    );
     _sttService = CommandSttService();
     _wakeService = WakeWordService(onWakeWordDetected: _handleWakeDetected);
     _sttService.state.addListener(_handleSttStateChange);
@@ -104,6 +116,7 @@ class _JanarymHomeState extends State<JanarymHome>
     _disposeCamera();
     _sfxPlayer.dispose();
     _tts.stop();
+    _circleController.dispose();
     super.dispose();
   }
 
@@ -166,6 +179,11 @@ class _JanarymHomeState extends State<JanarymHome>
       await _sfxPlayer.stop();
       await _sfxPlayer.play(AssetSource('sounds/thinking.wav'), volume: 0.6);
     } catch (_) {}
+  }
+
+  void _setCircleState(CircleState state) {
+    if (_circleState == state) return;
+    setState(() => _circleState = state);
   }
 
   Future<void> _initMicAndWake() async {
@@ -364,6 +382,7 @@ class _JanarymHomeState extends State<JanarymHome>
       _followUpActive = false;
     }
     _commandInFlight = false;
+    _setCircleState(CircleState.wake);
     await _runCommandFlow(reason: 'wake');
     _wakeHandling = false;
   }
@@ -377,6 +396,7 @@ class _JanarymHomeState extends State<JanarymHome>
     try {
       await _wakeService.stop();
       debugPrint('[STT] start ($reason)');
+      _setCircleState(CircleState.listening);
 
       final text = await _sttService.startCommandListening(
         durationSeconds: 5,
@@ -392,6 +412,7 @@ class _JanarymHomeState extends State<JanarymHome>
       } else {
         await _playEndCue();
         await _vibrateEnd();
+        _setCircleState(CircleState.end);
       }
     } finally {
       _commandInFlight = false;
@@ -423,6 +444,8 @@ class _JanarymHomeState extends State<JanarymHome>
       await _playThinkingCue();
       await _vibrateThinking();
     }
+    _setCircleState(CircleState.thinking);
+    await Future.delayed(const Duration(milliseconds: 450));
 
     try {
       final answer = await _openAi.askTextOnly(
@@ -436,6 +459,7 @@ class _JanarymHomeState extends State<JanarymHome>
         _lastAnswer = answer;
       });
       debugPrint('[GPT] ok');
+    _setCircleState(CircleState.speaking);
       await _speak(answer);
       await _startFollowUpWindow();
     } catch (e) {
@@ -479,6 +503,7 @@ class _JanarymHomeState extends State<JanarymHome>
         _lastAnswer = answer;
       });
       debugPrint('[GPT] vision ok');
+      _setCircleState(CircleState.speaking);
       await _speak(answer);
       await _startFollowUpWindow();
     } catch (e) {
@@ -630,131 +655,136 @@ class _JanarymHomeState extends State<JanarymHome>
     }
   }
 
+  String _circleLabel() {
+    switch (_circleState) {
+      case CircleState.wake:
+        return 'Жду команду';
+      case CircleState.listening:
+        return 'Слушаю';
+      case CircleState.thinking:
+        return 'Думаю';
+      case CircleState.speaking:
+        return 'Говорю';
+      case CircleState.end:
+        return 'Готов к работе';
+      case CircleState.idle:
+      default:
+        return 'Готов к работе';
+    }
+  }
+
+  _AssistantOrbTheme _orbThemeForState(CircleState state) {
+    switch (state) {
+      case CircleState.wake:
+        return const _AssistantOrbTheme(
+          gradient: [Color(0xFFE0E7FF), Color(0xFFD0D4FF), Color(0xFF94A3B8)],
+          glow: Color(0xFF94A3B8),
+          inner: Color(0xFF0F172A),
+          accent: Color(0xFF94A3B8),
+          pulseFactor: 0.5,
+        );
+      case CircleState.listening:
+        return const _AssistantOrbTheme(
+          gradient: [Color(0xFFFDE68A), Color(0xFFF97316), Color(0xFFEA580C)],
+          glow: Color(0xFFFBBF24),
+          inner: Color(0xFF2B1B0F),
+          accent: Color(0xFFF59E0B),
+          pulseFactor: 0.9,
+        );
+      case CircleState.thinking:
+        return const _AssistantOrbTheme(
+          gradient: [Color(0xFF8B5CF6), Color(0xFF7C3AED), Color(0xFF6D28D9)],
+          glow: Color(0xFFAEA0FF),
+          inner: Color(0xFF0C0F2C),
+          accent: Color(0xFF8B5CF6),
+          pulseFactor: 0.75,
+        );
+      case CircleState.speaking:
+        return const _AssistantOrbTheme(
+          gradient: [Color(0xFF10B981), Color(0xFF059669), Color(0xFF047857)],
+          glow: Color(0xFF34D399),
+          inner: Color(0xFF042B1C),
+          accent: Color(0xFF34D399),
+          pulseFactor: 0.7,
+        );
+      case CircleState.end:
+        return const _AssistantOrbTheme(
+          gradient: [Color(0xFF1E293B), Color(0xFF0F172A), Color(0xFF020617)],
+          glow: Color(0xFF64748B),
+          inner: Color(0xFF080C16),
+          accent: Color(0xFF94A3B8),
+          pulseFactor: 0.5,
+        );
+      case CircleState.idle:
+      default:
+        return const _AssistantOrbTheme(
+          gradient: [Color(0xFF1E293B), Color(0xFF0F172A), Color(0xFF020617)],
+          glow: Color(0xFF475569),
+          inner: Color(0xFF080C16),
+          accent: Color(0xFF94A3B8),
+          pulseFactor: 0.35,
+        );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final wakeState = _wakeService.state.value;
-    final sttState = _sttService.state.value;
+    final theme = _orbThemeForState(_circleState);
+    final statusText = _circleState == CircleState.listening
+        ? 'Слушаю'
+        : (_circleState == CircleState.thinking
+            ? 'Думаю'
+            : 'Готов к команде');
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Janarym'),
-      ),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              if (!_micGranted)
-                _InfoCard(
-                  title: 'Микрофон',
-                  text: _micMessage,
-                  tone: _InfoTone.warning,
-                )
-              else
-                _InfoCard(
-                  title: 'Микрофон',
-                  text: _micMessage,
-                  tone: _InfoTone.ok,
+      backgroundColor: const Color(0xFF020617),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xFF020617), Color(0xFF09021A), Color(0xFF140230)],
+          ),
+        ),
+        child: SafeArea(
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  statusText,
+                  style: const TextStyle(
+                    color: Color(0xFFD9298F),
+                    fontSize: 20,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
-              const SizedBox(height: 12),
-              _InfoCard(
-                title: 'Камера Live',
-                text: _cameraStatusText(),
-                tone: _cameraGranted ? _InfoTone.ok : _InfoTone.warning,
-              ),
-              const SizedBox(height: 12),
-              _SectionCard(
-                title: 'Voice Console',
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Wake: ${wakeState.isListening ? 'ON' : 'OFF'} '
-                      '(${wakeState.status.name})',
-                    ),
-                    Text('Last wake: ${_formatTimestamp(_lastWakeAt)}'),
-                    if (wakeState.lastError != null &&
-                        wakeState.lastError!.trim().isNotEmpty)
-                      Text(
-                        'Porcupine error: ${wakeState.lastError}',
-                        style: const TextStyle(color: Colors.redAccent),
-                      ),
-                    const SizedBox(height: 10),
-                    Text('STT: ${sttState.status.name}'),
-                    Text(
-                      'Live: ${sttState.liveWords.isEmpty ? '—' : sttState.liveWords}',
-                    ),
-                    Text(
-                      'Final: ${sttState.finalWords.isEmpty ? '—' : sttState.finalWords}',
-                    ),
-                    if (sttState.lastError != null &&
-                        sttState.lastError!.trim().isNotEmpty)
-                      Text(
-                        'STT error: ${sttState.lastError}',
-                        style: const TextStyle(color: Colors.redAccent),
-                      ),
-                    const SizedBox(height: 10),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text('GPT: ${_gptStatusLabel(_gptStatus)}'),
-                        ),
-                        TextButton(
-                          onPressed: _stopTtsOnly,
-                          child: const Text('Stop TTS'),
-                        ),
-                      ],
-                    ),
-                    Text(
-                      'Last answer: ${_lastAnswer.isEmpty ? '—' : _lastAnswer}',
-                    ),
-                    if (_gptStatus == GptStatus.error && _gptError.isNotEmpty)
-                      Text(
-                        'GPT error: $_gptError',
-                        style: const TextStyle(color: Colors.redAccent),
-                      ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 12),
-
-              _SectionCard(
-                title: 'Answer',
-                child: Text(
-                  _lastAnswer.isEmpty
-                      ? 'Ответ появится здесь.'
-                      : _lastAnswer,
-                  style: const TextStyle(fontSize: 16, height: 1.35),
-                ),
-              ),
-              const SizedBox(height: 12),
-
-              Row(
-                children: [
-                  Expanded(
-                    child: _BigButton(
-                      icon: Icons.mic,
-                      text: 'Голос',
-                      onPressed: () => _runCommandFlow(reason: 'manual'),
-                      enabled: !_commandInFlight,
-                      semanticLabel: 'Ручной запуск STT команды',
+                const SizedBox(height: 10),
+                if (_followUpActive)
+                  Text(
+                    'Жду вашего «же»...',
+                    style: TextStyle(
+                      color: Colors.white.withOpacity(0.7),
+                      fontSize: 14,
                     ),
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: _BigButton(
-                      icon: Icons.stop_circle_outlined,
-                      text: 'Стоп',
-                      onPressed: _stopAll,
-                      enabled: true,
-                      semanticLabel: 'Остановить STT и TTS',
+                const SizedBox(height: 24),
+                GestureDetector(
+                  onTap: () => _runCommandFlow(reason: 'manual'),
+                  child: AnimatedBuilder(
+                    animation: _circlePulse,
+                    builder: (context, child) {
+                      return Transform.scale(scale: _circlePulse.value, child: child);
+                    },
+                    child: _AssistantOrb(
+                      state: _circleState,
+                      label: _circleLabel(),
+                      theme: theme,
                     ),
                   ),
-                ],
-              ),
-
-            ],
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -934,4 +964,100 @@ Uint8List _convertYuvToJpeg(Map<String, dynamic> args) {
   }
 
   return Uint8List.fromList(img.encodeJpg(image, quality: 85));
+}
+
+class _AssistantOrbTheme {
+  final List<Color> gradient;
+  final Color glow;
+  final Color inner;
+  final Color accent;
+  final double pulseFactor;
+
+  const _AssistantOrbTheme({
+    required this.gradient,
+    required this.glow,
+    required this.inner,
+    required this.accent,
+    required this.pulseFactor,
+  });
+}
+
+class _AssistantOrb extends StatelessWidget {
+  final CircleState state;
+  final String label;
+  final _AssistantOrbTheme theme;
+
+  const _AssistantOrb({
+    required this.state,
+    required this.label,
+    required this.theme,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 210,
+      height: 210,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Container(
+            width: 210,
+            height: 210,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: RadialGradient(
+                colors: theme.gradient,
+                center: const Alignment(-0.3, -0.4),
+                radius: 0.9,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: theme.glow.withOpacity(0.5),
+                  blurRadius: 45,
+                  spreadRadius: 10,
+                ),
+              ],
+            ),
+          ),
+          Container(
+            width: 164,
+            height: 164,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: theme.inner,
+            ),
+            child: Center(
+              child: ClipOval(
+                child: Image.asset(
+                  'icon.png',
+                  width: 120,
+                  height: 120,
+                  fit: BoxFit.cover,
+                ),
+              ),
+            ),
+          ),
+          if (state == CircleState.listening)
+            Container(
+              width: 200,
+              height: 200,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: theme.accent.withOpacity(0.8), width: 3),
+              ),
+            ),
+          if (state == CircleState.thinking)
+            SizedBox(
+              width: 140,
+              height: 140,
+              child: CircularProgressIndicator(
+                strokeWidth: 4,
+                valueColor: AlwaysStoppedAnimation<Color>(theme.accent),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 }
